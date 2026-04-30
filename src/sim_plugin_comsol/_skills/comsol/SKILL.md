@@ -186,13 +186,24 @@ COMSOL has several visual surfaces. Do not collapse them into one
 | `headless` | `comsolmphserver` API session with no intentional visible windows. | Yes, API session only. |
 | `server-graphics` | `comsolmphserver -graphics`; plot windows may appear when a result plot is run. This is the current default effective mode. Legacy `ui_mode=gui` is an alias for this. | Yes for the server-side model, but there is no Model Builder tree. |
 | `desktop-inspection` | Save a `.mph` artifact, then open it in full COMSOL Desktop / Model Builder. | No. It is an inspection copy unless explicitly reloaded. |
-| `shared-desktop` | Future target: full COMSOL Desktop attached to the same live server-side model. | Not implemented yet. |
+| `shared-desktop` | Future target: full COMSOL Desktop attached to the same server, with the agent binding to the Desktop's active model tag. | Not implemented yet, but validated manually on Win1. |
 
 Use `sim inspect session.health` or `sim exec` target `session.health`
 to check `requested_ui_mode`, `effective_ui_mode`, `ui_capabilities`,
 PIDs, logs, and visible COMSOL window titles. Treat `model_builder_live:
 false` as authoritative: agent-side JPype edits will not automatically
 refresh a separately opened COMSOL Desktop window.
+
+Shared-desktop gotcha verified on Win1 with COMSOL 6.4: launching
+`comsol.exe mphclient -host localhost -port <port>` does attach a full
+Desktop to `comsolmphserver`. However, if JPype creates a separate
+server model tag with `ModelUtil.create("SharedProbe")`, the Desktop
+does not automatically switch from its active `Model1` tree to that
+new tag. When JPype instead mutates `ModelUtil.model("Model1")`, the
+Desktop refreshes: the title, Model Builder tree, and Graphics view
+show the API-created component/geometry. A production
+`shared-desktop` mode must therefore discover or negotiate the active
+Desktop model tag and route agent edits to that tag.
 
 ### Screenshot responsibility
 

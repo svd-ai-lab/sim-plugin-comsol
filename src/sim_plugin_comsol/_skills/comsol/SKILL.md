@@ -186,7 +186,7 @@ COMSOL has several visual surfaces. Do not collapse them into one
 | `headless` | `comsolmphserver` API session with no intentional visible windows. | Yes, API session only. |
 | `server-graphics` | `comsolmphserver -graphics`; plot windows may appear when a result plot is run. This is the current default effective mode. Legacy `ui_mode=gui` is an alias for this. | Yes for the server-side model, but there is no Model Builder tree. |
 | `desktop-inspection` | Save a `.mph` artifact, then open it in full COMSOL Desktop / Model Builder. | No. It is an inspection copy unless explicitly reloaded. |
-| `shared-desktop` | Future target: full COMSOL Desktop attached to the same server, with the agent binding to the Desktop's active model tag. | Not implemented yet, but validated manually on Win1. |
+| `shared-desktop` | Full COMSOL Desktop attached to the same server, with the agent binding to the Desktop's active model tag. Request from sim-cli with `--driver-option visual_mode=shared-desktop`. | Yes, when `model_builder_live: true`. |
 
 Use `sim inspect session.health` or `sim exec` target `session.health`
 to check `requested_ui_mode`, `effective_ui_mode`, `ui_capabilities`,
@@ -201,9 +201,20 @@ server model tag with `ModelUtil.create("SharedProbe")`, the Desktop
 does not automatically switch from its active `Model1` tree to that
 new tag. When JPype instead mutates `ModelUtil.model("Model1")`, the
 Desktop refreshes: the title, Model Builder tree, and Graphics view
-show the API-created component/geometry. A production
-`shared-desktop` mode must therefore discover or negotiate the active
-Desktop model tag and route agent edits to that tag.
+show the API-created component/geometry. The implemented
+`shared-desktop` mode therefore discovers or negotiates the active
+Desktop model tag and routes agent edits to that tag.
+
+Use:
+
+```powershell
+sim connect --solver comsol --ui-mode gui --driver-option visual_mode=shared-desktop
+```
+
+Then verify `session.health`: `effective_ui_mode` should be
+`shared-desktop`, `ui_capabilities.model_builder_live` should be `true`,
+and `active_model_tag` should name the model that agent snippets will
+mutate.
 
 ### Screenshot responsibility
 

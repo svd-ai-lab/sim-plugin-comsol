@@ -216,6 +216,32 @@ Then verify `session.health`: `effective_ui_mode` should be
 and `active_model_tag` should name the model that agent snippets will
 mutate.
 
+### Attach-only external server
+
+If repeated API client disconnects occur, or a user wants one COMSOL
+server to survive multiple sim sessions, use an externally managed server
+instead of mixing sim and ad hoc JPype scripts. The user or agent starts
+`comsolmphserver` first in an interactive Windows shell:
+
+```powershell
+& "C:\Program Files\COMSOL\COMSOL64\Multiphysics\bin\win64\comsolmphserver.exe" -port 2036 -multi on -login auto -silent
+```
+
+Then connect through sim with explicit attach-only ownership:
+
+```powershell
+sim connect --solver comsol --ui-mode gui `
+  --driver-option attach_only=true `
+  --driver-option port=2036 `
+  --driver-option visual_mode=shared-desktop
+```
+
+In attach-only mode, `session.health` should show
+`server_owner: "external"` and `attach_only: true`. `sim disconnect`
+disconnects the JPype client and any plugin-launched Desktop client, but
+does not kill the external `comsolmphserver`. Keep all agent operations
+inside the sim session; use ad hoc JPype only as a diagnostic escape hatch.
+
 ### Screenshot responsibility
 
 On a Codex Desktop host such as Win1, prefer Codex's own desktop

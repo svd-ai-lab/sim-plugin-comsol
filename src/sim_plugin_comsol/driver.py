@@ -142,6 +142,14 @@ def _default_comsol_readers() -> list[tuple[str, object]]:
     ]
 
 
+def _as_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 def _default_comsol_probes(enable_gui: bool = False) -> list:
     """COMSOL's probe list — generic_probes() + SDK readers + MPH file
     probe + optional GUI.
@@ -451,6 +459,8 @@ class ComsolDriver:
         self._client_log_path: Path | None = None
         self._desktop_pid: int | None = None
         self._active_model_tag: str | None = None
+        self._server_owner: str | None = None
+        self._attach_only: bool = False
         self._last_health: dict | None = None
         self._last_disconnect_reason: dict | None = None
         self._launch_options: dict = {}
@@ -668,7 +678,10 @@ class ComsolDriver:
     def _terminate_processes(self) -> None:
         self._kill_pid(self._desktop_pid)
         self._desktop_pid = None
-        for attr in ("_client_proc", "_server_proc"):
+        attrs = ["_client_proc"]
+        if self._server_owner != "external":
+            attrs.append("_server_proc")
+        for attr in attrs:
             proc = getattr(self, attr, None)
             if proc is None:
                 continue
@@ -715,6 +728,8 @@ class ComsolDriver:
             "client_log_path": str(self._client_log_path) if self._client_log_path else None,
             "client_log_tail": self._tail_file(self._client_log_path),
             "desktop_pid": self._desktop_pid,
+            "server_owner": self._server_owner,
+            "attach_only": self._attach_only,
         }
 
     def _lifecycle_error(self, code: str, message: str) -> ComsolLifecycleError:
@@ -842,6 +857,7 @@ class ComsolDriver:
     def _start_desktop_client(
         self,
         bin_dir: str,
+        host: str = "localhost",
         before_pids: set[int] | None = None,
         timeout_s: float = 45,
     ) -> None:
@@ -856,7 +872,7 @@ class ComsolDriver:
             client_exe,
             "mphclient",
             "-host",
-            "localhost",
+            host,
             "-port",
             str(self._port),
         ]
@@ -941,6 +957,58 @@ class ComsolDriver:
         except Exception:
             return []
 
+    def _bind_model(
+        self,
+        ModelUtil,
+        *,
+        preferred_tag: str | None = None,
+        wait_for_tag: bool = False,
+        timeout_s: float = 45,
+        allow_remove_stale: bool = False,
+    ) -> None:
+        model_tag = preferred_tag or "Model1"
+        deadline = time.time() + timeout_s
+        while wait_for_tag and time.time() < deadline:
+            tags = [str(tag) for tag in list(ModelUtil.tags())]
+            if model_tag in tags:
+                break
+            if tags and preferred_tag is None:
+                model_tag = tags[0]
+                break
+            time.sleep(1)
+
+        try:
+            tags = [str(tag) for tag in list(ModelUtil.tags())]
+            if model_tag in tags:
+                self._model = ModelUtil.model(model_tag)
+            elif tags and preferred_tag is None and not allow_remove_stale:
+                model_tag = tags[0]
+                self._model = ModelUtil.model(model_tag)
+            else:
+                try:
+                    self._model = ModelUtil.create(model_tag)
+                except Exception:
+                    if not allow_remove_stale:
+                        raise
+                    for stale in list(ModelUtil.tags()):
+                        try:
+                            ModelUtil.remove(stale)
+                        except Exception:
+                            pass
+                    try:
+                        self._model = ModelUtil.create(model_tag)
+                    except Exception:
+                        model_tag = f"Model_{uuid.uuid4().hex[:6]}"
+                        self._model = ModelUtil.create(model_tag)
+            self._active_model_tag = str(self._model.tag())
+        except Exception as exc:  # noqa: BLE001 - Java exceptions vary by version
+            code = self._classify_comsol_error(str(exc))
+            action = "bind" if not allow_remove_stale else "create"
+            raise self._lifecycle_error(
+                code,
+                f"ModelUtil.{action} failed for tag {model_tag!r}: {exc}",
+            ) from exc
+
     def health(self) -> dict:
         """Best-effort live-session health for `session.summary` / diagnostics."""
         server_returncode = self._server_proc.poll() if self._server_proc is not None else None
@@ -992,6 +1060,8 @@ class ComsolDriver:
             "ui_capabilities": self._ui_capabilities(),
             "port": self._port,
             "server_pid": getattr(self._server_proc, "pid", None),
+            "server_owner": self._server_owner,
+            "attach_only": self._attach_only,
             "server_running": server_running,
             "server_returncode": server_returncode,
             "server_log_path": str(self._server_log_path) if self._server_log_path else None,
@@ -1070,8 +1140,9 @@ class ComsolDriver:
     ) -> dict:
         """Launch comsolmphserver and connect via JPype.
 
-        1. Start `comsolmphserver.exe` as compute backend
-        2. Wait for it to listen on the port
+        1. Start `comsolmphserver.exe` as compute backend, or attach to an
+           externally managed server when `attach_only=true`
+        2. Wait for the target port to listen
         3. Connect via `ModelUtil.connect()` from JPype
         4. If ui_mode resolves to 'server-graphics', keep COMSOL server-side
            graphics enabled so plot windows can appear. If visual_mode resolves
@@ -1083,6 +1154,9 @@ class ComsolDriver:
         workspace = kwargs.pop("workspace", None)
         cwd = kwargs.pop("cwd", None)
         port = kwargs.pop("port", None)
+        attach_only = _as_bool(kwargs.pop("attach_only", False))
+        server_host = kwargs.pop("server_host", kwargs.pop("host", "localhost"))
+        model_tag = kwargs.pop("model_tag", None)
         visual_mode = kwargs.pop("visual_mode", None)
         desktop_timeout = float(kwargs.pop("desktop_timeout", 45))
         requested_ui_mode = ui_mode
@@ -1098,6 +1172,8 @@ class ComsolDriver:
         self._last_disconnect_reason = None
         self._desktop_pid = None
         self._active_model_tag = None
+        self._attach_only = attach_only
+        self._server_owner = "external" if attach_only else "plugin"
 
         root = self._resolve_comsol_root(comsol_root)
         user = user or os.environ.get("COMSOL_USER", "")
@@ -1116,6 +1192,10 @@ class ComsolDriver:
             "requested_visual_mode": visual_mode,
             "visual_mode": normalized_visual_mode,
             "desktop_timeout": desktop_timeout,
+            "attach_only": attach_only,
+            "server_owner": self._server_owner,
+            "server_host": server_host,
+            "model_tag": model_tag,
             "processors": processors,
             "comsol_root": root,
             "workspace": workspace,
@@ -1123,48 +1203,58 @@ class ComsolDriver:
             "port": self._port,
             **kwargs,
         }
-        self._server_log_path, self._server_log_handle = self._open_log("comsol-mphserver")
 
-        if self._check_port(self._port, timeout=0.5):
-            err = self._lifecycle_error(
-                "comsol.server.port_conflict",
-                f"port {self._port} is already accepting connections before launch",
-            )
-            self._close_log_handles()
-            raise err
-
-        # -login auto: use cached credentials set via `comsolmphserver -login force`
-        server_args = [
-            server_exe,
-            "-port", str(self._port),
-            "-multi", "on",
-            "-login", "auto",
-            "-silent",
-        ]
-        if effective_ui_mode == "server-graphics":
-            server_args += ["-graphics", "-3drend", "sw"]
         before_comsol_pids = self._comsol_process_pids()
-        self._server_proc = subprocess.Popen(
-            server_args,
-            stdout=self._server_log_handle,
-            stderr=subprocess.STDOUT,
-        )
+        if attach_only:
+            if not self._check_port(self._port, timeout=2):
+                err = self._lifecycle_error(
+                    "comsol.server.attach_port_closed",
+                    f"attach_only requested but {server_host}:{self._port} is not reachable",
+                )
+                self._close_log_handles()
+                raise err
+        else:
+            self._server_log_path, self._server_log_handle = self._open_log("comsol-mphserver")
 
-        try:
-            port_ready = self._wait_for_port(self._port, timeout=90)
-        except ComsolLifecycleError:
-            self._terminate_processes()
-            self._close_log_handles()
-            raise
+            if self._check_port(self._port, timeout=0.5):
+                err = self._lifecycle_error(
+                    "comsol.server.port_conflict",
+                    f"port {self._port} is already accepting connections before launch",
+                )
+                self._close_log_handles()
+                raise err
 
-        if not port_ready:
-            err = self._lifecycle_error(
-                "comsol.server.port_timeout",
-                f"comsolmphserver did not start listening on port {self._port} within 90s",
+            # -login auto: use cached credentials set via `comsolmphserver -login force`
+            server_args = [
+                server_exe,
+                "-port", str(self._port),
+                "-multi", "on",
+                "-login", "auto",
+                "-silent",
+            ]
+            if effective_ui_mode == "server-graphics":
+                server_args += ["-graphics", "-3drend", "sw"]
+            self._server_proc = subprocess.Popen(
+                server_args,
+                stdout=self._server_log_handle,
+                stderr=subprocess.STDOUT,
             )
-            self._terminate_processes()
-            self._close_log_handles()
-            raise err
+
+            try:
+                port_ready = self._wait_for_port(self._port, timeout=90)
+            except ComsolLifecycleError:
+                self._terminate_processes()
+                self._close_log_handles()
+                raise
+
+            if not port_ready:
+                err = self._lifecycle_error(
+                    "comsol.server.port_timeout",
+                    f"comsolmphserver did not start listening on port {self._port} within 90s",
+                )
+                self._terminate_processes()
+                self._close_log_handles()
+                raise err
 
         # Connect JPype first (lightweight, doesn't grab an exclusive lock)
         # so the GUI client launching next won't race us on "Server is in
@@ -1185,9 +1275,9 @@ class ComsolDriver:
 
         try:
             if user and password:
-                ModelUtil.connect("localhost", self._port, user, password)
+                ModelUtil.connect(server_host, self._port, user, password)
             else:
-                ModelUtil.connect("localhost", self._port)
+                ModelUtil.connect(server_host, self._port)
         except Exception as exc:  # noqa: BLE001 - Java exceptions vary by version
             code = self._classify_comsol_error(str(exc))
             err = self._lifecycle_error(
@@ -1206,6 +1296,7 @@ class ComsolDriver:
             try:
                 self._start_desktop_client(
                     bin_dir,
+                    host=server_host,
                     before_pids=before_comsol_pids,
                     timeout_s=desktop_timeout,
                 )
@@ -1218,63 +1309,47 @@ class ComsolDriver:
                 self._close_log_handles()
                 raise err from exc
 
-            deadline = time.time() + desktop_timeout
-            _model_tag = "Model1"
-            while time.time() < deadline:
-                tags = [str(tag) for tag in list(ModelUtil.tags())]
-                if _model_tag in tags:
-                    break
-                if tags:
-                    _model_tag = tags[0]
-                    break
-                time.sleep(1)
             try:
-                tags = [str(tag) for tag in list(ModelUtil.tags())]
-                if _model_tag in tags:
-                    self._model = ModelUtil.model(_model_tag)
-                else:
-                    self._model = ModelUtil.create(_model_tag)
-                self._active_model_tag = str(self._model.tag())
-            except Exception as exc:  # noqa: BLE001 - Java exceptions vary by version
-                code = self._classify_comsol_error(str(exc))
-                err = self._lifecycle_error(
-                    code,
-                    f"failed to bind shared Desktop model tag {_model_tag!r}: {exc}",
+                self._bind_model(
+                    ModelUtil,
+                    preferred_tag=model_tag,
+                    wait_for_tag=True,
+                    timeout_s=desktop_timeout,
+                    allow_remove_stale=False,
                 )
+            except ComsolLifecycleError as err:
                 self._terminate_processes()
                 self._close_log_handles()
-                raise err from exc
+                raise err
+        elif attach_only:
+            try:
+                self._bind_model(
+                    ModelUtil,
+                    preferred_tag=model_tag,
+                    wait_for_tag=False,
+                    timeout_s=desktop_timeout,
+                    allow_remove_stale=False,
+                )
+            except ComsolLifecycleError as err:
+                self._terminate_processes()
+                self._close_log_handles()
+                raise err
         else:
             # Create model. Guard against the server surviving a previous
             # disconnect(): if "Model1" already exists on the server, that tag
             # belongs to a stale session — remove it first, then create fresh.
             # Fallback: if removal is refused, create with a session-unique name
             # so we never conflict.
-            _model_tag = "Model1"
             try:
-                try:
-                    self._model = ModelUtil.create(_model_tag)
-                except Exception:
-                    for _stale in list(ModelUtil.tags()):
-                        try:
-                            ModelUtil.remove(_stale)
-                        except Exception:
-                            pass
-                    try:
-                        self._model = ModelUtil.create(_model_tag)
-                    except Exception:
-                        _model_tag = f"Model_{uuid.uuid4().hex[:6]}"
-                        self._model = ModelUtil.create(_model_tag)
-                self._active_model_tag = str(self._model.tag())
-            except Exception as exc:  # noqa: BLE001 - Java exceptions vary by version
-                code = self._classify_comsol_error(str(exc))
-                err = self._lifecycle_error(
-                    code,
-                    f"ModelUtil.create failed: {exc}",
+                self._bind_model(
+                    ModelUtil,
+                    preferred_tag=model_tag,
+                    allow_remove_stale=True,
                 )
+            except ComsolLifecycleError as err:
                 self._terminate_processes()
                 self._close_log_handles()
-                raise err from exc
+                raise err
 
         self._ui_mode = effective_ui_mode
         self._connected_at = time.time()
@@ -1304,6 +1379,8 @@ class ComsolDriver:
             "ui_note": ui_note,
             "ui_capabilities": self._ui_capabilities(effective_ui_mode),
             "port": self._port,
+            "server_owner": self._server_owner,
+            "attach_only": self._attach_only,
             "model_tag": str(self._model.tag()),
             "active_model_tag": self._active_model_tag,
             "desktop_pid": self._desktop_pid,
@@ -1495,5 +1572,8 @@ class ComsolDriver:
         self._last_health = reason
         self._session_id = None
         self._connected_at = None
+        self._active_model_tag = None
+        self._server_owner = None
+        self._attach_only = False
         self._run_count = 0
         self._last_run = None

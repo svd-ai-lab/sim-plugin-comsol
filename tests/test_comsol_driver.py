@@ -287,6 +287,50 @@ class TestLifecycleDiagnostics:
         assert health["active_model_tag"] == "Model1"
         assert health["windows"][0]["role"] == "desktop"
 
+    def test_health_reports_attach_only_external_server(self, monkeypatch):
+        driver = ComsolDriver()
+        driver._session_id = "s-test"
+        driver._model = object()
+        driver._server_proc = None
+        driver._server_owner = "external"
+        driver._attach_only = True
+        driver._active_model_tag = "Model1"
+        driver._port = 65000
+        driver._ui_mode = "headless"
+        driver._launch_options = {
+            "requested_ui_mode": "no_gui",
+            "ui_mode": "headless",
+            "attach_only": True,
+            "server_owner": "external",
+            "server_host": "localhost",
+        }
+        monkeypatch.setattr(driver, "_check_port", lambda *_args, **_kwargs: True)
+
+        health = driver.health()
+
+        assert health["connected"] is True
+        assert health["server_pid"] is None
+        assert health["server_owner"] == "external"
+        assert health["attach_only"] is True
+        assert health["active_model_tag"] == "Model1"
+
+    def test_attach_only_terminate_does_not_kill_external_server(self, monkeypatch):
+        driver = ComsolDriver()
+        server = FakeProcess(pid=2468, returncode=None)
+        client = FakeProcess(pid=1357, returncode=None)
+        killed_pids = []
+        driver._server_proc = server
+        driver._client_proc = client
+        driver._desktop_pid = 9753
+        driver._server_owner = "external"
+        monkeypatch.setattr(driver, "_kill_pid", lambda pid: killed_pids.append(pid))
+
+        driver._terminate_processes()
+
+        assert server.killed is False
+        assert client.killed is True
+        assert killed_pids == [9753]
+
     def test_query_session_health(self):
         driver = ComsolDriver()
 

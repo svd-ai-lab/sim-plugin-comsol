@@ -264,6 +264,10 @@ or human handoff.
 
 Use this policy:
 
+- Do not build serious geometry, materials, physics, meshes, studies, sweeps,
+  or results in `Untitled.mph` or an unnamed `Model1`. The first real modeling
+  step is to create or bind a durable project identity, set a visible
+  title/label, set the working folder, and save an initial `.mph` checkpoint.
 - If the user provided an `.mph`, load that exact file and bind the session to
   a clear model tag derived from the case name.
 - If starting from scratch in the sim runtime, pass a descriptive
@@ -300,11 +304,15 @@ uv run sim inspect comsol.model.describe_text
 
 Treat `comsol.model.identity.checkpoint_ready=false`, missing
 `file_path`/`location`, or a bound tag that does not match `active_model_tag`
-as a pause-and-repair condition before doing new modeling work.
+as a pause-and-repair condition before doing new modeling work. Repair means
+creating or binding the intended project, setting the model path, and saving an
+initial `.mph`; do not "just continue" in the untitled session.
 
 Scratch probes and one-off API experiments may stay as `Model1` or
 `Untitled.mph`, but label them as disposable in the agent's status and do not
-mix them with user-facing engineering artifacts.
+mix them with user-facing engineering artifacts. If a scratch probe turns into
+real work, stop and rebuild it under a named project rather than letting the
+untitled session become the deliverable.
 
 ---
 
@@ -343,7 +351,9 @@ assignment.
 2. For sim runtime, run `uv run sim check comsol`, connect if needed, and read
    `session.versions` plus `uv run sim inspect session.health`.
 3. Establish or verify model identity, working folder, and checkpoint target.
-   Inspect `comsol.model.identity` when available.
+   Inspect `comsol.model.identity` when available. If the model is untitled,
+   unsaved, missing a file path, or lacks the intended working folder, fix that
+   before creating geometry, materials, physics, mesh, study, or result nodes.
 4. Inspect the baseline state with `uv run sim inspect
    comsol.model.describe_text` when available.
 5. Execute one bounded modeling step.
